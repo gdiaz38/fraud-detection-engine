@@ -1,2 +1,11 @@
-pandas numpy scikit-learn xgboost fastapi uvicorn streamlit plotly joblib kagglehub networkx
-
+pandas 
+numpy 
+scikit-learn 
+xgboost 
+fastapi 
+uvicorn 
+streamlit 
+plotly 
+joblib 
+kagglehub 
+networkx
