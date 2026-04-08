@@ -1,11 +1,21 @@
 # 🛡️ Real-Time Fraud Detection Engine
 
+[![Live Demo](https://img.shields.io/badge/🚀%20Live%20Demo-Streamlit-FF4B4B?style=for-the-badge)](https://fraud-detection-engine-gdiaz38.streamlit.app/)
+
 Production-style fraud detection system built on 284k real European credit card 
 transactions. Two-stage detection: XGBoost classifier + card velocity anomaly detection, 
 deployed as a REST API with a live monitoring dashboard.
 
 ---
 
+## 🚀 Try It Live
+
+**[→ Open Live Dashboard](https://fraud-detection-engine-gdiaz38.streamlit.app/)**
+
+Score individual transactions, run batch simulations with adjustable fraud rates, 
+and monitor the real-time audit log.
+
+---
 ## Results
 
 | Metric | Value |
