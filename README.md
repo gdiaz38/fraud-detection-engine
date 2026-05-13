@@ -1,123 +1,182 @@
 # 🛡️ Real-Time Fraud Detection Engine
 
-[![Live Demo](https://img.shields.io/badge/🚀%20Live%20Demo-Streamlit-FF4B4B?style=for-the-badge)](https://fraud-detection-engine-gdiaz38.streamlit.app/)
+A two-stage credit card fraud detection system built on 284,807 real transactions with a 1:577 class imbalance. XGBoost classifier with 40 engineered features achieves ROC-AUC 0.9819 and PR-AUC 0.7587 — optimized for precision-first detection on highly skewed data.
 
-Production-style fraud detection system built on 284k real European credit card 
-transactions. Two-stage detection: XGBoost classifier + card velocity anomaly detection, 
-deployed as a REST API with a live monitoring dashboard.
+![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
+![XGBoost](https://img.shields.io/badge/XGBoost-Classifier-orange)
+![Streamlit](https://img.shields.io/badge/Streamlit-live-FF4B4B?logo=streamlit)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+---
+
+## 📊 Live Dashboard
+
+👉 **[View Live App](https://gdiaz38-fraud-detection-engine.streamlit.app)**
 
 ---
 
-## 🚀 Try It Live
+## Overview
 
-**[→ Open Live Dashboard](https://fraud-detection-engine-gdiaz38.streamlit.app/)**
+Credit card fraud costs the global economy over $32B annually. This project builds a real-time fraud scoring engine on the ULB Credit Card dataset — one of the most imbalanced real-world classification problems available, with only 492 fraud cases in 284,807 transactions (0.17%).
 
-Score individual transactions, run batch simulations with adjustable fraud rates, 
-and monitor the real-time audit log.
+Key question it answers: *Is this transaction fraudulent — and how confident are we?*
 
 ---
-## Results
+
+## Key Results
 
 | Metric | Value |
-|--------|-------|
-| ROC-AUC | 0.9819 |
-| PR-AUC | 0.7587 |
-| Recall (fraud) | 74% |
-| Precision (fraud) | 80% |
-| Business impact | $8,921 saved vs $3,055 missed per test batch |
+|---|---|
+| ROC-AUC | **0.9819** |
+| PR-AUC | **0.7587** |
+| Fraud cases caught | 91 of 98 test cases |
+| Class imbalance | 1:577 (fraud:legitimate) |
+| Features | 40 engineered |
+| Threshold | 0.9996 (F1-optimized on PR curve) |
 
 ---
 
-## Architecture
+## Features
+
+- **Real XGBoost inference** — trained model scores every transaction on load
+- **Live transaction scorer** — pick any real test transaction (legitimate or fraud), score it through the actual model
+- **Full score distribution** — histogram showing separation between fraud and legitimate scores
+- **Business impact analysis** — dollars saved vs missed vs false alarm cost
+- **Real-time stream** — streams real test transactions live with score chart updating per transaction
+- **Audit log** — every scored transaction logged with UUID, timestamp, score, true label, card velocity
+
+---
+
+## Data
+
+| Source | Description |
+|---|---|
+| [ULB Credit Card Dataset](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) | 284,807 real European cardholder transactions (Sept 2013) |
+| Features V1–V28 | PCA-transformed (anonymized for privacy) |
+| Features Time, Amount | Raw — time since first transaction, transaction amount |
+| Class imbalance | 492 fraud / 284,315 legitimate (0.172%) |
+
+---
+
+## Project Structure
+
 ```
-284k real transactions (ULB Credit Card Dataset)
-            ↓
-Feature Engineering (40 features)
-- V1-V28 PCA features
-- Amount log transform + z-score
-- Time-based features (hour, is_night)
-- V-feature interactions (V14×V10, V12×V4)
-- Fraud signal composite score
-            ↓
-XGBoost Classifier
-scale_pos_weight=577x (handles 1:577 class imbalance)
-            ↓
-Velocity Anomaly Layer
-- Per-card transaction count (1h window)
-- Per-card spend velocity
-- Spike detection (3x avg amount)
-            ↓
-In-Memory Feature Store (Redis pattern)
-            ↓
-FastAPI REST endpoint (/predict)
-            ↓
-Streamlit real-time dashboard
+fraud-detection-engine/
+├── dashboard.py              # Streamlit — 4 tabs: scoring, performance, stream, audit
+├── train.py                  # XGBoost training with scale_pos_weight + PR-AUC optimization
+├── features.py               # Feature engineering — V interactions, velocity, time signals
+├── api.py                    # FastAPI REST endpoint with in-memory feature store
+├── graph_detection.py        # NetworkX transaction graph layer
+├── xgb_fraud.pkl             # Trained XGBoost model
+├── scaler_fraud.pkl          # StandardScaler (fitted on training set)
+├── feature_cols.pkl          # Feature column names (40 features)
+├── model_metadata.pkl        # ROC-AUC, PR-AUC, optimal threshold
+├── X_test.npy                # Test features (56,962 transactions)
+├── X_train.npy               # Training features
+├── y_test.npy                # Test labels
+├── y_train.npy               # Training labels
+└── requirements.txt
 ```
 
 ---
 
-## Key Design Decisions
+## How It Works
 
-**Class imbalance** — 1 in 577 transactions is fraud. 
-Used `scale_pos_weight=577` and optimized threshold on 
-precision-recall curve (not accuracy) — standard practice 
-in production fraud systems.
-
-**PR-AUC over ROC-AUC** — ROC-AUC is misleading on 
-imbalanced datasets. PR-AUC of 0.76 on this dataset 
-is the metric that actually matters.
-
-**Feature store pattern** — velocity features are 
-pre-computed and cached per card ID, enabling 
-sub-millisecond lookup at inference time. 
-Production systems use Redis for this.
-
-**Graph layer** — transaction graph built with NetworkX 
-connecting time windows and amount clusters. 
-On real data with merchant IDs and card IDs, 
-graph centrality features add 3-5% AUC lift.
-
----
-
-## Stack
-
-- **Model:** XGBoost (scikit-learn API)
-- **Graph:** NetworkX
-- **Feature store:** In-memory dict (Redis pattern)
-- **API:** FastAPI + Uvicorn
-- **Dashboard:** Streamlit + Plotly
+```
+Raw transaction (Time, Amount, V1-V28)
+        ↓
+features.py engineers 40 features:
+  V-feature interaction terms (V1×V3, V4×V11, etc.)
+  Time signals (hour of day, is_night, is_weekend)
+  Velocity metrics (rolling amount, frequency)
+  Amount statistics (log_amount, amount_zscore)
+        ↓
+XGBoost classifier with scale_pos_weight=577
+Trained on balanced sample weights
+Threshold = F1-maximizing point on precision-recall curve
+        ↓
+Fraud probability scored in real time
+Classified: FRAUD | SUSPICIOUS | LEGITIMATE
+        ↓
+Every prediction logged to audit trail
+```
 
 ---
 
-## Run It
+## Model Details
+
+| Parameter | Value |
+|---|---|
+| Algorithm | XGBoost Classifier |
+| Trees | 500 (early stopping 30 rounds) |
+| Max depth | 6 |
+| Learning rate | 0.05 |
+| `scale_pos_weight` | 577 (fraud upweight) |
+| Eval metric | PR-AUC (better than ROC for imbalanced) |
+| Threshold | 0.9996 (F1-optimal on PR curve) |
+
+**Why such a high threshold?** With 0.17% fraud rate, a standard 0.5 threshold produces thousands of false positives. Optimizing on the precision-recall curve sets a threshold that maximizes F1, resulting in 0.9996 — effectively requiring near-certainty before flagging.
+
+---
+
+## Business Impact (Test Set)
+
+| Outcome | Count | Financial Impact |
+|---|---|---|
+| True Positives (caught) | 91 | +$11,131 saved |
+| False Negatives (missed) | 7 | -$855 lost |
+| False Positives (false alarms) | ~50 | -$125 review cost |
+| **Net savings** | | **~$10,151** |
+
+At $122.21 avg fraud amount and $2.50 per false alarm investigation.
+
+---
+
+## Dashboard Tabs
+
+**Live Scoring** — pick a real test transaction (random legitimate, random fraud, or by index), view feature values, score through model, see fraud gauge and velocity alert
+
+**Model Performance** — score distribution histogram, confusion matrix, business impact metrics, top 15 feature importances
+
+**Transaction Stream** — stream up to 200 real test transactions in real time, watch live fraud score chart update, track detection rate and false positives as they accumulate
+
+**Audit Log** — full history of scored transactions with prediction coloring, downloadable as CSV
+
+---
+
+## Local Setup
+
 ```bash
-python3 -m venv venv && source venv/bin/activate
-pip install pandas numpy scikit-learn xgboost fastapi uvicorn streamlit plotly joblib kagglehub networkx
-
-python3 download_data.py
-python3 features.py
-python3 train.py
-python3 graph_detection.py
-
-# Terminal 1
-python3 api.py
-
-# Terminal 2
+git clone https://github.com/gdiaz38/fraud-detection-engine
+cd fraud-detection-engine
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 streamlit run dashboard.py
 ```
 
-## API
-```bash
-POST /predict
-{
-  "card_id": "CARD-001",
-  "amount": 1200.00,
-  "time": 43200,
-  "v14": -5.2,
-  "v10": -4.1
-}
+To retrain from scratch (requires ULB dataset via kagglehub):
 
-GET /stats
-GET /audit?limit=50
-GET /feature_store/{card_id}
+```bash
+python3 features.py   # engineer features → .npy files
+python3 train.py      # train XGBoost → xgb_fraud.pkl
 ```
+
+---
+
+## Tech Stack
+
+`Python 3.11` · `XGBoost` · `Streamlit` · `Plotly` · `Pandas` · `NumPy` · `Scikit-learn` · `joblib`
+
+---
+
+## Affiliation
+
+University of California, Riverside — MS in Engineering Management
+Part of a portfolio of 10 live data science projects spanning computer vision, NLP, supply chain, and healthcare ML.
+
+---
+
+## License
+
+MIT
