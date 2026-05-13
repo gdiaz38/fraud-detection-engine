@@ -11,7 +11,7 @@ A two-stage credit card fraud detection system built on 284,807 real transaction
 
 ## 📊 Live Dashboard
 
-👉 **[View Live App](https://gdiaz38-fraud-detection-engine.streamlit.app)**
+👉 **[View Live App](https://fraud-detection-engine-gdiaz38.streamlit.app)**
 
 ---
 
