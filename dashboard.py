@@ -3,290 +3,362 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import random
-import uuid
+import joblib, os, uuid, time
 from datetime import datetime
 
-st.set_page_config(
-    page_title="Fraud Detection Engine",
-    page_icon="🛡️",
-    layout="wide"
-)
+st.set_page_config(page_title="Fraud Detection Engine", page_icon="🛡️", layout="wide")
+st.markdown('<h1 style="color:#ff4444">🛡️ Real-Time Fraud Detection Engine</h1>', unsafe_allow_html=True)
+st.markdown('<p style="color:#888">XGBoost · ROC-AUC 0.9819 · PR-AUC 0.7587 · 40 engineered features · 1:577 class imbalance</p>', unsafe_allow_html=True)
 
-st.markdown("""
-<style>
-    .main-header { font-size:2.2rem; font-weight:700; color:#ff4444; }
-    .sub-header  { color:#888; margin-bottom:1.5rem; }
-</style>
-""", unsafe_allow_html=True)
+BASE = os.path.dirname(__file__)
 
-st.markdown('<div class="main-header">🛡️ Real-Time Fraud Detection Engine</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">XGBoost classifier (ROC-AUC 0.98) + velocity anomaly detection + in-memory feature store | ULB Credit Card Dataset</div>', unsafe_allow_html=True)
+@st.cache_resource
+def load_model():
+    model  = joblib.load(os.path.join(BASE, "xgb_fraud.pkl"))
+    meta   = joblib.load(os.path.join(BASE, "model_metadata.pkl"))
+    fc     = joblib.load(os.path.join(BASE, "feature_cols.pkl"))
+    return model, meta, fc
 
-# ── Fraud V-feature profiles ──────────────────────────────────────────────────
-LEGIT_PROFILE  = {"v14": -0.1, "v10":  0.2, "v12":  0.1, "v4":  0.3, "v11":  0.1}
-FRAUD_PROFILE  = {"v14": -5.2, "v10": -4.1, "v12": -3.8, "v4":  4.5, "v11":  3.2}
-MEDIUM_PROFILE = {"v14": -1.8, "v10": -1.5, "v12": -1.2, "v4":  1.8, "v11":  1.2}
+@st.cache_data
+def load_data():
+    X_test = np.load(os.path.join(BASE, "X_test.npy"))
+    y_test = np.load(os.path.join(BASE, "y_test.npy"))
+    return X_test, y_test
 
-# ── Local fraud scorer (XGBoost logic approximated) ───────────────────────────
-def score_locally(card_id, amount, time_val, v14, v10, v12,
-                  velocity_count=1, avg_amount=100.0):
-    # Feature weights learned from XGBoost (top features from training)
-    fraud_signal  = (
-        -0.18 * v14
-        - 0.15 * v10
-        - 0.13 * v12
-        + 0.08 * max(0, abs(v14) - 3)
-        + 0.06 * (amount / 1000)
-        + 0.05 * (1 if (time_val < 21600 or time_val > 79200) else 0)  # night
-        + 0.04 * min(velocity_count / 5, 1.0)
-    )
-    # Normalize to 0-1 probability
-    fraud_score = 1 / (1 + np.exp(-fraud_signal * 2.5 + 1.2))
-    fraud_score = float(np.clip(fraud_score + np.random.normal(0, 0.015), 0, 1))
+@st.cache_data
+def get_all_scores():
+    X_test, y_test = load_data()
+    model, meta, _ = load_model()
+    # X_test is NOT pre-scaled — pass directly to model
+    y_prob = model.predict_proba(X_test)[:, 1]
+    y_pred = (y_prob >= meta["threshold"]).astype(int)
+    return y_prob, y_pred
 
-    velocity_alert = velocity_count >= 3 or (amount > avg_amount * 3)
+model, meta, feature_cols = load_model()
+X_test, y_test             = load_data()
+y_prob, y_pred             = get_all_scores()
+THRESHOLD                  = meta["threshold"]
 
-    if fraud_score >= 0.75:
-        prediction    = "FRAUD"
-        risk_level    = "CRITICAL"
-        recommendation= "Block transaction immediately. Flag card for review."
-        color         = "#ff4444"
-    elif fraud_score >= 0.45:
-        prediction    = "SUSPICIOUS"
-        risk_level    = "HIGH"
-        recommendation= "Hold for manual review. Send OTP verification."
-        color         = "#ffa500"
-    else:
-        prediction    = "LEGITIMATE"
-        risk_level    = "LOW"
-        recommendation= "Approve transaction."
-        color         = "#00d4aa"
+fraud_idx  = np.where(y_test == 1)[0]
+legit_idx  = np.where(y_test == 0)[0]
 
-    return {
-        "prediction":     prediction,
-        "fraud_score":    round(fraud_score, 4),
-        "risk_level":     risk_level,
-        "recommendation": recommendation,
-        "velocity_alert": velocity_alert,
-        "amount":         amount,
-        "transaction_id": str(uuid.uuid4()),
-        "timestamp":      datetime.utcnow().isoformat(),
-        "color":          color
-    }
+tp = int(((y_pred == 1) & (y_test == 1)).sum())
+fp = int(((y_pred == 1) & (y_test == 0)).sum())
+fn = int(((y_pred == 0) & (y_test == 1)).sum())
+tn = int(((y_pred == 0) & (y_test == 0)).sum())
 
-# ── Session state for audit log ───────────────────────────────────────────────
+def classify(score):
+    if score >= THRESHOLD:
+        return "FRAUD",      "#ff4444", "🔴", "Block immediately. Flag card for review."
+    if score >= THRESHOLD * 0.85:
+        return "SUSPICIOUS", "#ffa500", "🟠", "Hold for manual review. Send OTP."
+    return     "LEGITIMATE", "#00d4aa", "🟢", "Approve transaction."
+
 if "audit_log" not in st.session_state:
     st.session_state.audit_log = []
-if "velocity_store" not in st.session_state:
-    st.session_state.velocity_store = {}
+if "velocity" not in st.session_state:
+    st.session_state.velocity = {}
 
-tab1, tab2, tab3 = st.tabs(["⚡ Live Scoring", "📊 Analytics", "🗂️ Audit Log"])
+# ── KPIs ──────────────────────────────────────────────────────────────────────
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("Test Transactions", f"{len(y_test):,}")
+k2.metric("True Fraud Cases",  f"{y_test.sum()}")
+k3.metric("ROC-AUC",           f"{meta['roc_auc']:.4f}")
+k4.metric("PR-AUC",            f"{meta['pr_auc']:.4f}")
+k5.metric("Fraud Caught",      f"{tp}/{y_test.sum()}",
+          f"{tp/y_test.sum():.0%} recall")
+st.divider()
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "⚡ Live Scoring", "📊 Model Performance",
+    "🔄 Transaction Stream", "🗂️ Audit Log"
+])
 
 # ════════════════════════════════════════════════════════════════════════════
 with tab1:
-    st.subheader("Single Transaction Scorer")
+    st.subheader("Score a Real Test Transaction")
 
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns([1, 2])
     with col1:
-        card_id  = st.text_input("Card ID", value="CARD-TEST-001")
-        amount   = st.number_input("Amount ($)", min_value=0.01,
-                                   max_value=10000.0, value=99.99)
-        time_val = st.slider("Time (hours since midnight)", 0, 47, 12) * 3600
-        profile  = st.selectbox("Transaction profile",
-                                 ["Legitimate", "Suspicious", "Fraud"])
+        card_id   = st.text_input("Card ID", value="CARD-001")
+        tx_type   = st.radio("Pick transaction type",
+                             ["Random Legitimate", "Random Fraud", "By Index"])
+
+        if tx_type == "Random Legitimate":
+            idx = int(np.random.choice(legit_idx))
+        elif tx_type == "Random Fraud":
+            idx = int(np.random.choice(fraud_idx))
+        else:
+            idx = st.number_input("Test set index", 0, len(X_test)-1, 0)
+
+        tx      = X_test[idx]
+        true_label = "FRAUD" if y_test[idx] == 1 else "LEGITIMATE"
+        amount  = abs(float(tx[-1])) * 100  # Amount is last feature
+        st.caption(f"Transaction #{idx} | True label: **{true_label}**")
 
     with col2:
-        default_v14 = (LEGIT_PROFILE if profile == "Legitimate"
-                       else FRAUD_PROFILE if profile == "Fraud"
-                       else MEDIUM_PROFILE)["v14"]
-        default_v10 = (LEGIT_PROFILE if profile == "Legitimate"
-                       else FRAUD_PROFILE if profile == "Fraud"
-                       else MEDIUM_PROFILE)["v10"]
-        default_v12 = (LEGIT_PROFILE if profile == "Legitimate"
-                       else FRAUD_PROFILE if profile == "Fraud"
-                       else MEDIUM_PROFILE)["v12"]
-
-        v14 = st.slider("V14 (fraud indicator)", -10.0, 5.0, default_v14)
-        v10 = st.slider("V10", -10.0, 5.0, default_v10)
-        v12 = st.slider("V12", -10.0, 5.0, default_v12)
+        top_features = feature_cols[:10]
+        fig_feat = go.Figure(go.Bar(
+            x=[float(tx[feature_cols.index(f)]) for f in top_features],
+            y=top_features, orientation="h",
+            marker_color=["#ff4444" if v < -2 else "#00d4aa"
+                          for v in [float(tx[feature_cols.index(f)])
+                                    for f in top_features]]
+        ))
+        fig_feat.update_layout(template="plotly_dark", height=280,
+                               title="Top Feature Values",
+                               xaxis_title="Value", yaxis_title="")
+        st.plotly_chart(fig_feat, use_container_width=True)
 
     if st.button("🔍 Score Transaction", type="primary"):
-        # Velocity tracking per card
-        vc = st.session_state.velocity_store
+        score  = float(y_prob[idx])
+        pred, color, icon, rec = classify(score)
+
+        vc = st.session_state.velocity
         vc[card_id] = vc.get(card_id, 0) + 1
+        vel_alert   = vc[card_id] >= 3
 
-        result = score_locally(card_id, amount, time_val, v14, v10, v12,
-                               velocity_count=vc[card_id])
-
-        # Add to audit log
         st.session_state.audit_log.append({
-            "transaction_id": result["transaction_id"][:16] + "...",
+            "record_id":      str(uuid.uuid4())[:16],
             "card_id":        card_id,
+            "tx_index":       idx,
             "amount":         round(amount, 2),
-            "fraud_score":    result["fraud_score"],
-            "prediction":     result["prediction"],
-            "timestamp":      result["timestamp"][:19]
+            "fraud_score":    round(score, 6),
+            "prediction":     pred,
+            "true_label":     true_label,
+            "correct":        pred == true_label,
+            "velocity":       vc[card_id],
+            "timestamp":      datetime.utcnow().isoformat()[:19]
         })
 
-        color = result["color"]
         st.markdown(f"""
         <div style="background:#1a1a1a;border:2px solid {color};
-                    border-radius:10px;padding:1.5rem;text-align:center;margin:1rem 0">
-            <h2 style="color:{color};margin:0">{result['prediction']}</h2>
-            <h1 style="color:{color};margin:0.5rem 0">
-                Fraud Score: {result['fraud_score']:.4f}
-            </h1>
-            <p style="color:#aaa">{result['recommendation']}</p>
-            <p style="color:#666;font-size:0.8rem">
-                TX: {result['transaction_id'][:16]}... | {result['timestamp'][:19]}
-            </p>
+                    border-radius:10px;padding:1.5rem;text-align:center">
+            <h2 style="color:{color}">{icon} {pred}</h2>
+            <h1 style="color:{color}">Score: {score:.6f}</h1>
+            <p style="color:#aaa">{rec}</p>
+            <p style="color:#666">Threshold: {THRESHOLD:.6f} | True label: {true_label}</p>
         </div>
         """, unsafe_allow_html=True)
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Risk Level",     result["risk_level"])
-        c2.metric("Velocity Alert", "⚠️ YES" if result["velocity_alert"] else "✅ NO")
-        c3.metric("Card Velocity",  f"{vc[card_id]} tx this session")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Fraud Score",    f"{score:.6f}")
+        m2.metric("Threshold",      f"{THRESHOLD:.4f}")
+        m3.metric("Velocity Alert", "⚠️ YES" if vel_alert else "✅ NO")
+        m4.metric("Card Txs",       f"{vc[card_id]} this session")
 
-        fig = go.Figure(go.Indicator(
+        fig_gauge = go.Figure(go.Indicator(
             mode="gauge+number",
-            value=result["fraud_score"] * 100,
-            title={"text": "Fraud Score (%)"},
+            value=score * 100,
+            number={"suffix": "%", "valueformat": ".4f"},
+            title={"text": "Fraud Probability (%)"},
             gauge={
                 "axis":  {"range": [0, 100]},
                 "bar":   {"color": color},
                 "steps": [
-                    {"range": [0,  45], "color": "#0d2b1f"},
-                    {"range": [45, 75], "color": "#2b1f0d"},
-                    {"range": [75, 100],"color": "#2b0d0d"}
+                    {"range": [0,  THRESHOLD*100*0.85], "color": "#0d2b1f"},
+                    {"range": [THRESHOLD*100*0.85, THRESHOLD*100], "color": "#2b1f0d"},
+                    {"range": [THRESHOLD*100, 100], "color": "#2b0d0d"}
                 ],
-                "threshold": {
-                    "line":  {"color": "white", "width": 3},
-                    "value": 75
-                }
+                "threshold": {"line": {"color": "white", "width": 3},
+                              "value": THRESHOLD * 100}
             }
         ))
-        fig.update_layout(template="plotly_dark", height=300)
-        st.plotly_chart(fig, use_container_width=True)
+        fig_gauge.update_layout(template="plotly_dark", height=300)
+        st.plotly_chart(fig_gauge, use_container_width=True)
 
 # ════════════════════════════════════════════════════════════════════════════
 with tab2:
-    st.subheader("Transaction Stream Simulation")
-    n_transactions = st.slider("Transactions to simulate", 20, 100, 50)
-    fraud_rate     = st.slider("Injected fraud rate (%)", 5, 40, 15)
+    st.subheader("Model Performance — Full Test Set")
 
-    if st.button("▶ Run Simulation", type="primary"):
-        results  = []
-        progress = st.progress(0)
-        status   = st.empty()
+    col1, col2 = st.columns(2)
 
-        for i in range(n_transactions):
-            is_fraud = random.random() < (fraud_rate / 100)
-            profile  = FRAUD_PROFILE if is_fraud else LEGIT_PROFILE
-            amount   = random.uniform(500, 2000) if is_fraud \
-                       else random.uniform(5, 300)
-            card_id  = f"CARD-{random.randint(1, 20):03d}"
-
-            v14 = profile["v14"] + random.gauss(0, 0.3)
-            v10 = profile["v10"] + random.gauss(0, 0.3)
-            v12 = profile["v12"] + random.gauss(0, 0.3)
-
-            result = score_locally(card_id, amount,
-                                   random.uniform(0, 86400),
-                                   v14, v10, v12)
-            results.append({
-                "tx":          i + 1,
-                "card_id":     card_id,
-                "amount":      round(amount, 2),
-                "fraud_score": result["fraud_score"],
-                "prediction":  result["prediction"],
-                "injected":    "FRAUD" if is_fraud else "LEGIT"
-            })
-            progress.progress((i + 1) / n_transactions)
-            status.text(f"Scored {i+1}/{n_transactions} transactions...")
-
-        df = pd.DataFrame(results)
-        status.empty()
-        progress.empty()
-
-        detected    = len(df[(df["prediction"] == "FRAUD") &
-                             (df["injected"]   == "FRAUD")])
-        total_fraud = len(df[df["injected"] == "FRAUD"])
-        false_pos   = len(df[(df["prediction"] == "FRAUD") &
-                             (df["injected"]   == "LEGIT")])
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Scored",    n_transactions)
-        c2.metric("Fraud Detected",  f"{detected}/{total_fraud}")
-        c3.metric("False Positives", false_pos)
-        c4.metric("Avg Fraud Score",
-                  f"{df[df['injected']=='FRAUD']['fraud_score'].mean():.3f}")
-
-        fig = make_subplots(1, 2, subplot_titles=(
-            "Fraud Score Distribution", "Predictions vs Injected"))
-
-        fig.add_trace(go.Histogram(
-            x=df[df["injected"] == "LEGIT"]["fraud_score"],
+    with col1:
+        # Score distribution
+        fig1 = go.Figure()
+        fig1.add_trace(go.Histogram(
+            x=y_prob[y_test == 0], nbinsx=80,
             name="Legitimate", marker_color="#00d4aa", opacity=0.7
-        ), row=1, col=1)
-        fig.add_trace(go.Histogram(
-            x=df[df["injected"] == "FRAUD"]["fraud_score"],
-            name="Fraud", marker_color="#ff4444", opacity=0.7
-        ), row=1, col=1)
+        ))
+        fig1.add_trace(go.Histogram(
+            x=y_prob[y_test == 1], nbinsx=40,
+            name="Fraud", marker_color="#ff4444", opacity=0.9
+        ))
+        fig1.add_vline(x=THRESHOLD, line_dash="dash", line_color="white",
+                       annotation_text=f"Threshold={THRESHOLD:.4f}")
+        fig1.update_layout(template="plotly_dark", height=340,
+                           title="Fraud Score Distribution",
+                           xaxis_title="Fraud Probability",
+                           barmode="overlay", legend=dict(orientation="h", y=1.05))
+        st.plotly_chart(fig1, use_container_width=True)
 
-        pred_counts = df["prediction"].value_counts()
-        fig.add_trace(go.Bar(
-            x=pred_counts.index,
-            y=pred_counts.values,
-            marker_color=["#ff4444" if x == "FRAUD"
-                          else "#ffa500" if x == "SUSPICIOUS"
-                          else "#00d4aa"
-                          for x in pred_counts.index]
-        ), row=1, col=2)
+    with col2:
+        # Confusion matrix
+        cm = np.array([[tn, fp], [fn, tp]])
+        fig2 = go.Figure(go.Heatmap(
+            z=cm, text=cm, texttemplate="%{text}",
+            x=["Pred: Legit", "Pred: Fraud"],
+            y=["True: Legit", "True: Fraud"],
+            colorscale="Blues", showscale=False
+        ))
+        fig2.update_layout(template="plotly_dark", height=340,
+                           title="Confusion Matrix")
+        st.plotly_chart(fig2, use_container_width=True)
 
-        fig.update_layout(template="plotly_dark", height=400)
-        st.plotly_chart(fig, use_container_width=True)
+    # Business impact
+    st.subheader("💰 Business Impact Analysis")
+    avg_fraud = 122.21
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Fraud Caught (TP)",   tp, f"${tp*avg_fraud:,.0f} saved")
+    b2.metric("Fraud Missed (FN)",   fn, f"-${fn*avg_fraud:,.0f} lost")
+    b3.metric("False Alarms (FP)",   fp, f"-${fp*2.50:,.0f} review cost")
+    b4.metric("Net Savings",
+              f"${tp*avg_fraud - fn*avg_fraud - fp*2.50:,.0f}")
 
-        with st.expander("📋 Transaction log"):
-            st.dataframe(df, use_container_width=True)
+    # Feature importance
+    st.subheader("Top 15 Feature Importances")
+    imp     = model.feature_importances_
+    top_idx = np.argsort(imp)[::-1][:15]
+    fig3 = go.Figure(go.Bar(
+        x=imp[top_idx],
+        y=[feature_cols[i] for i in top_idx],
+        orientation="h", marker_color="#ff4444"
+    ))
+    fig3.update_layout(template="plotly_dark", height=420,
+                       xaxis_title="Importance",
+                       yaxis=dict(autorange="reversed"))
+    st.plotly_chart(fig3, use_container_width=True)
 
 # ════════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.subheader("Audit Log & System Stats")
+    st.subheader("Real-Time Transaction Stream — Live Scoring")
+    st.caption("Streams real test transactions one at a time through the model")
 
+    n_stream   = st.slider("Transactions to stream", 20, 200, 50)
+    include_fraud = st.checkbox("Ensure fraud cases are included", value=True)
+    speed      = st.slider("Speed (tx/sec)", 1, 20, 8)
+
+    if st.button("▶ Start Stream", type="primary"):
+        # Mix real fraud and legit transactions
+        if include_fraud:
+            n_fraud = max(5, int(n_stream * 0.15))
+            n_legit = n_stream - n_fraud
+            stream_fraud = np.random.choice(fraud_idx,
+                           min(n_fraud, len(fraud_idx)), replace=False)
+            stream_legit = np.random.choice(legit_idx, n_legit, replace=False)
+            stream_indices = np.concatenate([stream_fraud, stream_legit])
+        else:
+            stream_indices = np.random.choice(len(X_test), n_stream, replace=False)
+
+        np.random.shuffle(stream_indices)
+
+        placeholder = st.empty()
+        history = []
+
+        for i, idx in enumerate(stream_indices):
+            score      = float(y_prob[idx])
+            true_lbl   = int(y_test[idx])
+            pred, color, icon, _ = classify(score)
+            correct    = (pred == "FRAUD") == (true_lbl == 1)
+            history.append({
+                "tx": i+1, "score": score,
+                "pred": pred, "true": true_lbl, "correct": correct
+            })
+
+            with placeholder.container():
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Streamed",    f"{i+1}/{n_stream}")
+                c2.metric("Fraud Caught",
+                          sum(1 for h in history
+                              if h["pred"]=="FRAUD" and h["true"]==1))
+                c3.metric("False Positives",
+                          sum(1 for h in history
+                              if h["pred"]=="FRAUD" and h["true"]==0))
+                c4.metric("Accuracy",
+                          f"{sum(h['correct'] for h in history)/len(history):.1%}")
+
+                fig4 = go.Figure()
+                h_df = pd.DataFrame(history)
+                fig4.add_trace(go.Scatter(
+                    x=h_df["tx"], y=h_df["score"],
+                    mode="lines+markers",
+                    marker=dict(
+                        color=["#ff4444" if p=="FRAUD"
+                               else "#ffa500" if p=="SUSPICIOUS"
+                               else "#00d4aa" for p in h_df["pred"]],
+                        size=8
+                    ),
+                    line=dict(color="#444", width=1)
+                ))
+                fig4.add_hline(y=THRESHOLD, line_dash="dash",
+                               line_color="white",
+                               annotation_text="Fraud threshold")
+                fig4.update_layout(
+                    template="plotly_dark", height=300,
+                    title="Live Fraud Score Stream",
+                    yaxis_title="Fraud Score", xaxis_title="Transaction"
+                )
+                st.plotly_chart(fig4, use_container_width=True)
+
+            time.sleep(1.0 / speed)
+
+        st.success(f"✅ Streamed {n_stream} transactions")
+
+# ════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("🗂️ Audit Log")
     log = st.session_state.audit_log
     if log:
         df_audit = pd.DataFrame(log)
-
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Scored",   len(df_audit))
-        c2.metric("Fraud Flagged",
-                  len(df_audit[df_audit["prediction"] == "FRAUD"]))
-        c3.metric("Suspicious",
-                  len(df_audit[df_audit["prediction"] == "SUSPICIOUS"]))
-        c4.metric("Avg Fraud Score",
-                  f"{df_audit['fraud_score'].mean():.3f}")
+        c1.metric("Total Scored",    len(df_audit))
+        c2.metric("Flagged Fraud",
+                  len(df_audit[df_audit["prediction"]=="FRAUD"]))
+        c3.metric("Correct",
+                  f"{df_audit['correct'].mean():.1%}" if "correct" in df_audit else "—")
+        c4.metric("Unique Cards",    df_audit["card_id"].nunique())
+
+        def color_pred(val):
+            if val == "FRAUD":      return "color:#ff4444"
+            if val == "SUSPICIOUS": return "color:#ffa500"
+            return "color:#00d4aa"
 
         st.dataframe(
-            df_audit[["transaction_id","card_id","amount",
-                       "fraud_score","prediction","timestamp"]],
+            df_audit.style.applymap(color_pred, subset=["prediction"]),
             use_container_width=True
         )
-        st.download_button(
-            "⬇ Download Audit CSV",
-            df_audit.to_csv(index=False),
-            "fraud_audit.csv", "text/csv"
-        )
+        st.download_button("⬇ Download Audit CSV",
+                           df_audit.to_csv(index=False),
+                           "fraud_audit.csv", "text/csv")
     else:
-        st.info("No transactions scored yet. Use the Live Scoring tab to score transactions.")
+        st.info("No transactions scored yet.")
 
     st.markdown("---")
     st.markdown("""
     ### System Architecture
-    - **XGBoost Classifier** — 40 engineered features, ROC-AUC 0.9819
-    - **Velocity Detection** — per-card transaction frequency and amount monitoring
-    - **Feature Store** — Redis-pattern in-memory store for sub-millisecond feature lookup
-    - **Graph Layer** — NetworkX transaction graph (merchant/time window nodes)
-    - **Audit Trail** — every prediction logged with UUID, timestamp, score, card ID
+    - **XGBoost Classifier** — 40 engineered features, scale_pos_weight=577
+    - **Threshold** — optimized on PR curve (F1-maximizing)
+    - **Velocity detection** — per-card transaction frequency monitoring
+    - **Feature store** — Redis-pattern in-memory store
+    - **Audit trail** — every prediction logged with UUID and timestamp
     """)
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("📊 Model Stats")
+    st.markdown(f"**Test samples:** {len(y_test):,}")
+    st.markdown(f"**True fraud:** {int(y_test.sum())} ({y_test.mean():.2%})")
+    st.markdown(f"**ROC-AUC:** {meta['roc_auc']:.4f}")
+    st.markdown(f"**PR-AUC:** {meta['pr_auc']:.4f}")
+    st.markdown(f"**Threshold:** {THRESHOLD:.4f}")
+    st.markdown(f"**Recall:** {tp}/{int(y_test.sum())}")
+    st.markdown(f"**Precision:** {tp}/{tp+fp if tp+fp>0 else 1:.0f}")
+    st.markdown("---")
+    st.markdown("**Dataset**")
+    st.markdown("- ULB Credit Card (Kaggle)")
+    st.markdown("- 284,807 transactions")
+    st.markdown("- 1:577 fraud ratio")
+    st.markdown("---")
+    if st.button("🔄 Clear Cache"):
+        st.cache_data.clear()
+        st.rerun()

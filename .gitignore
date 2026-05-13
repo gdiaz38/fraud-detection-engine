@@ -1,6 +1,6 @@
 venv/
-*.npy
-*.pkl
-__pycache__/
 .DS_Store
+__pycache__/
+*.pyc
+.python-version
 *.png
